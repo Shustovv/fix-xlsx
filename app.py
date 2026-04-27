@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import tempfile
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 
 app = FastAPI()
 
@@ -22,11 +22,9 @@ async def normalize_xlsx(file: UploadFile = File(...)):
 
     with tempfile.TemporaryDirectory() as tmp:
         in_path = os.path.join(tmp, "input.xlsx")
-        out_path = os.path.join(tmp, "normalized.xlsx")
 
-        data = await file.read()
         with open(in_path, "wb") as f:
-            f.write(data)
+            f.write(await file.read())
 
         cmd = [
             soffice,
@@ -39,12 +37,7 @@ async def normalize_xlsx(file: UploadFile = File(...)):
             "--outdir", tmp,
             in_path,
         ]
-
         proc = subprocess.run(cmd, capture_output=True, text=True)
-
-        # LibreOffice часто пишет output в stdout, even on success
-        # И обычно имя = input.xlsx, поэтому учитываем оба варианта
-        produced_default = os.path.join(tmp, "input.xlsx")
 
         if proc.returncode != 0:
             return JSONResponse(
@@ -57,11 +50,14 @@ async def normalize_xlsx(file: UploadFile = File(...)):
                 },
             )
 
-        if os.path.exists(out_path):
-            final_path = out_path
-        elif os.path.exists(produced_default):
-            final_path = produced_default
-        else:
+        # LibreOffice обычно пишет output с тем же именем
+        candidates = [
+            os.path.join(tmp, "input.xlsx"),
+            os.path.join(tmp, "normalized.xlsx"),
+        ]
+        out_path = next((p for p in candidates if os.path.exists(p)), None)
+
+        if not out_path:
             return JSONResponse(
                 status_code=500,
                 content={
@@ -71,8 +67,15 @@ async def normalize_xlsx(file: UploadFile = File(...)):
                 },
             )
 
-        return FileResponse(
-            final_path,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=file.filename.replace(".xlsx", "_fixed.xlsx"),
-        )
+        with open(out_path, "rb") as f:
+            content = f.read()
+
+    out_name = (file.filename[:-5] if file.filename.lower().endswith(".xlsx") else file.filename) + "_fixed.xlsx"
+
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{out_name}"'
+        },
+    )
